@@ -118,7 +118,8 @@ Projects are stored in `~/.config/scp-select/projects.json`.
 | `Space`             | Toggle selection on current item |
 | `a`                 | Select all in current pane |
 | `c`                 | Clear selections in current pane |
-| `/`                 | Filter entries by name |
+| `/`                 | Fuzzy-find entries by name |
+| `s`                 | Cycle sorting: name, type, size, modified |
 | `r`                 | Refresh current pane |
 | `d`                 | Delete current item (with confirm) |
 | `m`                 | Make a new directory in current pane |
@@ -128,12 +129,19 @@ Projects are stored in `~/.config/scp-select/projects.json`.
 | `q` / `Esc`         | Quit (with confirm) |
 
 Push copies the selected local items into the *current remote directory*; pull copies
-the selected remote items into the *current local directory*. Existing files are
-overwritten (standard scp behaviour).
+the selected remote items into the *current local directory*. Before each transfer,
+scp-select shows the file count and total size and asks once before overwriting conflicts.
+
+Fuzzy finding updates the active pane live as you type and uses case-insensitive
+subsequence matching, so a query such as `cfg` can match `project_config.yml`.
+Press Enter to keep the query, Esc to restore the previous query, or Ctrl-U to clear it.
+Exact substrings rank ahead of looser matches. Sorting is independent for each pane and
+directories remain grouped before files.
 
 ## Notes / limitations
 
-- Host keys are auto-accepted (like `ssh -o StrictHostKeyChecking=accept-new`). Tighten
-  this in `Remote.connect` if you prefer strict checking.
+- New host keys are trusted on first use and stored in
+  `~/.config/scp-select/known_hosts`. A changed key is blocked.
 - Passwords are never stored; you are prompted (masked) only if key/agent auth fails.
-- Transfers are sequential and overwrite on conflict.
+- Transfers are sequential. Conflicting destination files require batch confirmation.
+- Failed downloads use a temporary partial file and do not replace a valid destination.

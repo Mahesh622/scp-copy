@@ -19,3 +19,16 @@ Thumbs.db
 
 # Local test artifacts
 .coverage
+
+# Credentials and local environment
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+id_rsa*
+id_ed25519*
+
+# scp-select runtime state
+projects.json
+known_hosts

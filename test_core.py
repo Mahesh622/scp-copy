@@ -4,6 +4,7 @@ import os
 import sys
 import tempfile
 import shutil
+from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -230,7 +231,7 @@ def test_remote_suggest():
     res2 = suggest("/srv/a")
     basenames = {base_name(r) for r in res2}
     assert "app" in basenames and "archive" in basenames
-    assert "readme.md" not in basenames
+    assert [base_name(r) for r in res2[:2]] == ["app", "archive"]
     # drill into a subdir with trailing slash
     res3 = suggest("/srv/app/")
     inner = {base_name(r) for r in res3}
@@ -239,6 +240,135 @@ def test_remote_suggest():
     assert isinstance(suggest(""), list)
     print("ok  remote_suggest (prefix filter, drill-in, trailing slash, root)")
 
+
+
+def test_fuzzy_score_and_pane_sorting(tmp_path):
+    assert S.fuzzy_score("app", "application.py") < S.fuzzy_score("app", "a-p-p.log")
+    assert S.fuzzy_score("cfg", "project_config.yml") is not None
+    assert S.fuzzy_score("xyz", "config.yml") is None
+
+    root = tmp_path / "sorting"
+    root.mkdir()
+    (root / "dir").mkdir()
+    (root / "small.txt").write_text("x")
+    (root / "large.bin").write_bytes(b"x" * 20)
+    pane = S.Pane("local", str(root))
+    assert [e.name for e in pane.view[1:]] == ["dir", "large.bin", "small.txt"]
+    pane.cycle_sort()  # type
+    assert pane.sort_mode == "type"
+    pane.cycle_sort()  # size
+    assert [e.name for e in pane.view[1:]] == ["dir", "small.txt", "large.bin"]
+    pane.filter = "lbn"
+    pane.apply_filter()
+    assert [e.name for e in pane.view] == ["large.bin"]
+
+    class Keys:
+        def __init__(self, values):
+            self.values = iter(values)
+
+        def getch(self):
+            return next(self.values)
+
+    snapshots = []
+    pane.filter = ""
+    accepted = S.live_fuzzy_filter(
+        Keys([ord("l"), ord("b"), ord("n"), 10]),
+        pane,
+        lambda help_text: snapshots.append([e.name for e in pane.view]),
+    )
+    assert accepted and pane.filter == "lbn"
+    assert snapshots[-1] == ["large.bin"]
+
+    restored = S.live_fuzzy_filter(Keys([ord("x"), 27]), pane, lambda help_text: None)
+    assert not restored and pane.filter == "lbn"
+    assert [e.name for e in pane.view] == ["large.bin"]
+    print("ok  fuzzy ranking, live filtering + independent pane sorting")
+
+
+def test_config_recovery_and_validation(tmp_path):
+    cfg_dir = tmp_path / "secure-config"
+    S.CONFIG_DIR = cfg_dir
+    S.CONFIG_FILE = cfg_dir / "projects.json"
+    cfg_dir.mkdir()
+    S.CONFIG_FILE.write_text("{broken")
+    cfg = S.load_config()
+    assert cfg == {"projects": []}
+    assert S.CONFIG_WARNING
+    assert list(cfg_dir.glob("projects.json.corrupt-*"))
+    S.save_config(cfg)
+    assert (S.CONFIG_FILE.stat().st_mode & 0o777) == 0o600
+
+    valid = S.Project(name="demo", host="user@example.com", local_dir=str(tmp_path),
+                      remote_dir="/srv")
+    assert S.validate_project(valid) == []
+    valid.port = 70000
+    assert "Port" in S.validate_project(valid)[0]
+    print("ok  config recovery, permissions + project validation")
+
+
+def test_transfer_results_conflicts_and_cleanup(tmp_path):
+    class PushSFTP:
+        def __init__(self):
+            self.puts = []
+
+        def mkdir(self, path):
+            pass
+
+        def put(self, lp, rp, callback=None):
+            if rp.endswith("bad.txt"):
+                raise IOError("denied")
+            self.puts.append(rp)
+            if callback:
+                callback(1, 1)
+
+    remote = type("R", (), {})()
+    remote.sftp = PushSFTP()
+    progress = S.TransferProgress(2, 2, None)
+    result = S.do_push(remote, [("good.txt", "/r/good.txt", 1),
+                                ("bad.txt", "/r/bad.txt", 1)], [], progress)
+    assert result.completed == 1 and result.failed == 1
+    assert progress.done_files == 1
+
+    remote.exists = lambda path: path.endswith("good.txt")
+    conflicts = S.transfer_conflicts(
+        "push", remote, [("good.txt", "/r/good.txt", 1), ("new.txt", "/r/new.txt", 1)]
+    )
+    assert conflicts == ["/r/good.txt"]
+
+    class FailingGet:
+        def get(self, rp, lp, callback=None):
+            Path(lp).write_text("partial")
+            raise IOError("connection lost")
+
+    remote.sftp = FailingGet()
+    out = tmp_path / "failed.txt"
+    progress = S.TransferProgress(10, 1, None)
+    result = S.do_pull(remote, [("/r/failed.txt", str(out), 10)], [], progress)
+    assert result.failed == 1 and not out.exists()
+    assert not Path(str(out) + ".scp-select.part").exists()
+    print("ok  transfer results, conflicts + partial cleanup")
+
+
+def test_cli_and_alias_validation():
+    args = S.build_parser().parse_args(["--install", "scp-fast"])
+    assert args.install == "scp-fast"
+    assert S.validate_alias("scp-fast") == "scp-fast"
+    wrapped = []
+    original_wrapper = S.curses.wrapper
+    try:
+        S.curses.wrapper = lambda entrypoint: wrapped.append(entrypoint)
+        assert S.cli([]) == 0
+    finally:
+        S.curses.wrapper = original_wrapper
+    assert wrapped == [S.main]
+    for invalid in ("../bad", "bad name", "bad;name"):
+        try:
+            S.validate_alias(invalid)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"unsafe alias accepted: {invalid}")
+    print("ok  CLI parsing + alias validation")
 
 def main():
     with tempfile.TemporaryDirectory() as d:
@@ -249,9 +379,13 @@ def main():
         test_local_list(tmp)
         test_local_suggest(tmp)
         test_remote_suggest()
+        test_fuzzy_score_and_pane_sorting(tmp)
         test_plan_push(tmp)
         test_plan_pull(tmp)
         test_do_pull_writes_files(tmp)
+        test_config_recovery_and_validation(tmp)
+        test_transfer_results_conflicts_and_cleanup(tmp)
+        test_cli_and_alias_validation()
     print("\nALL TESTS PASSED")
 
 

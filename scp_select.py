@@ -6,13 +6,17 @@ Save "projects" that map a local directory to a remote host + directory, then br
 both sides, toggle-select files, and transfer them with a single keypress instead of
 typing long scp paths by hand.
 """
+import argparse
 import curses
 import os
 import sys
 import json
+import re
 import stat
 import shutil
-from dataclasses import dataclass, asdict
+import tempfile
+import time
+from dataclasses import dataclass, asdict, field, replace
 from pathlib import Path
 from typing import List, Optional
 
@@ -20,6 +24,9 @@ import paramiko
 
 CONFIG_DIR = Path.home() / ".config" / "scp-select"
 CONFIG_FILE = CONFIG_DIR / "projects.json"
+KNOWN_HOSTS_FILE = CONFIG_DIR / "known_hosts"
+VERSION = "1.1.0"
+CONFIG_WARNING = ""
 
 _COLORS = False
 
@@ -36,14 +43,21 @@ class Project:
 
 
 def project_from_dict(d: dict) -> Project:
+    try:
+        port = int(d.get("port", 22) or 22)
+    except (TypeError, ValueError):
+        port = 22
     return Project(
         name=d.get("name", ""),
         host=d.get("host", ""),
-        port=int(d.get("port", 22) or 22),
+        port=port,
         local_dir=os.path.expanduser(d.get("local_dir", "") or str(Path.home())),
         remote_dir=d.get("remote_dir", ""),
         identity_file=os.path.expanduser(d.get("identity_file", "") or ""),
-        use_agent=bool(d.get("use_agent", True)),
+        use_agent=(
+            d.get("use_agent", True) if isinstance(d.get("use_agent", True), bool)
+            else str(d.get("use_agent", True)).strip().lower() in ("y", "yes", "1", "true")
+        ),
     )
 
 
@@ -52,11 +66,22 @@ def project_to_dict(p: Project) -> dict:
 
 
 def load_config() -> dict:
+    global CONFIG_WARNING
+    CONFIG_WARNING = ""
     if CONFIG_FILE.exists():
         try:
-            with open(CONFIG_FILE, "r") as f:
+            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
-        except Exception:
+            if not isinstance(data, dict) or not isinstance(data.get("projects", []), list):
+                raise ValueError("expected an object with a projects list")
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            stamp = time.strftime("%Y%m%d-%H%M%S")
+            backup = CONFIG_FILE.with_name(f"{CONFIG_FILE.name}.corrupt-{stamp}")
+            try:
+                shutil.copy2(CONFIG_FILE, backup)
+                CONFIG_WARNING = f"Invalid config backed up to {backup.name}: {exc}"
+            except OSError:
+                CONFIG_WARNING = f"Invalid config could not be backed up: {exc}"
             data = {}
     else:
         data = {}
@@ -66,8 +91,44 @@ def load_config() -> dict:
 
 def save_config(cfg: dict) -> None:
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    with open(CONFIG_FILE, "w") as f:
-        json.dump(cfg, f, indent=2)
+    try:
+        CONFIG_DIR.chmod(0o700)
+    except OSError:
+        pass
+    fd, tmp_name = tempfile.mkstemp(prefix=".projects-", suffix=".tmp", dir=str(CONFIG_DIR))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, indent=2)
+            f.write("\n")
+            f.flush()
+            os.fsync(f.fileno())
+        os.chmod(tmp_name, 0o600)
+        os.replace(tmp_name, CONFIG_FILE)
+    except Exception:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
+
+
+def validate_project(project: Project) -> List[str]:
+    errors = []
+    if not project.name.strip():
+        errors.append("Name is required.")
+    host = project.host.rsplit("@", 1)[-1].strip()
+    if not host or any(ch.isspace() for ch in host):
+        errors.append("Host must be a hostname or user@hostname without spaces.")
+    if not 1 <= project.port <= 65535:
+        errors.append("Port must be between 1 and 65535.")
+    local_dir = os.path.expanduser(project.local_dir)
+    if not os.path.isdir(local_dir):
+        errors.append("Local directory must exist and be a directory.")
+    if project.identity_file and not os.path.isfile(os.path.expanduser(project.identity_file)):
+        errors.append("Identity file does not exist.")
+    if project.remote_dir and not project.remote_dir.startswith("/"):
+        errors.append("Remote directory must be an absolute path.")
+    return errors
 
 
 def human_size(n: int) -> str:
@@ -108,6 +169,32 @@ def posix_basename(path: str) -> str:
     return path.rstrip("/").rsplit("/", 1)[-1]
 
 
+def fuzzy_score(query: str, candidate: str) -> Optional[int]:
+    # Lower scores represent tighter case-insensitive subsequence matches.
+    query = query.casefold().strip()
+    candidate_folded = candidate.casefold()
+    if not query:
+        return 0
+    exact_at = candidate_folded.find(query)
+    if exact_at >= 0:
+        return exact_at * 10 + len(candidate) - len(query)
+
+    positions = []
+    start = 0
+    for char in query:
+        found = candidate_folded.find(char, start)
+        if found < 0:
+            return None
+        positions.append(found)
+        start = found + 1
+    gaps = sum(b - a - 1 for a, b in zip(positions, positions[1:]))
+    word_bonus = sum(
+        1 for pos in positions
+        if pos == 0 or candidate_folded[pos - 1] in " /_.-"
+    )
+    return 1000 + positions[0] * 10 + gaps * 4 + len(candidate) - word_bonus * 6
+
+
 def local_suggest(text: str) -> List[str]:
     """Suggest local path completions for the typed text (dirs get trailing sep)."""
     t = os.path.expanduser(text or "")
@@ -123,15 +210,16 @@ def local_suggest(text: str) -> List[str]:
         names = sorted(os.listdir(parent))
     except OSError:
         return []
-    out = []
+    ranked = []
     for name in names:
-        if not name.startswith(prefix):
+        score = fuzzy_score(prefix, name)
+        if score is None:
             continue
         full = os.path.join(parent, name)
         if os.path.isdir(full):
             full += os.sep
-        out.append(full)
-    return out
+        ranked.append((score, name.casefold(), full))
+    return [full for _, _, full in sorted(ranked)]
 
 
 def remote_suggest(remote: "Remote"):
@@ -147,17 +235,18 @@ def remote_suggest(remote: "Remote"):
             entries = remote.listdir(parent)
         except IOError:
             return []
-        out = []
+        ranked = []
         for e in entries:
             if e.name in (".", ".."):
                 continue
-            if not e.name.startswith(prefix):
+            score = fuzzy_score(prefix, e.name)
+            if score is None:
                 continue
             full = posix_join(parent, e.name)
             if e.is_dir:
                 full += "/"
-            out.append(full)
-        return out
+            ranked.append((score, e.name.casefold(), full))
+        return [full for _, _, full in sorted(ranked)]
     return suggest
 
 
@@ -187,6 +276,14 @@ class Remote:
 
     def connect(self, password: Optional[str] = None) -> None:
         client = paramiko.SSHClient()
+        client.load_system_host_keys()
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        KNOWN_HOSTS_FILE.touch(mode=0o600, exist_ok=True)
+        try:
+            KNOWN_HOSTS_FILE.chmod(0o600)
+        except OSError:
+            pass
+        client.load_host_keys(str(KNOWN_HOSTS_FILE))
         client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
         host = self.project.host
         username = "root"
@@ -209,6 +306,13 @@ class Remote:
         self.sftp = client.open_sftp()
         self.connected = True
 
+    def exists(self, path: str) -> bool:
+        try:
+            self.sftp.stat(path)
+            return True
+        except IOError:
+            return False
+
     def close(self):
         try:
             if self.sftp:
@@ -230,7 +334,7 @@ class Remote:
         for attr in self.sftp.listdir_attr(path):
             is_dir = stat.S_ISDIR(attr.st_mode or 0)
             out.append(Entry(name=attr.filename, is_dir=is_dir, size=attr.st_size or 0,
-                             path=posix_join(path, attr.filename)))
+                             path=posix_join(path, attr.filename), mtime=attr.st_mtime or 0))
         return out
 
     def is_dir(self, path: str) -> bool:
@@ -261,6 +365,7 @@ class Entry:
     is_dir: bool
     size: int
     path: str
+    mtime: float = 0
 
 
 def local_list(path: str) -> List[Entry]:
@@ -280,7 +385,7 @@ def local_list(path: str) -> List[Entry]:
             size = 0 if is_dir else st.st_size
         except OSError:
             continue
-        out.append(Entry(name=n, is_dir=is_dir, size=size, path=fp))
+        out.append(Entry(name=n, is_dir=is_dir, size=size, path=fp, mtime=st.st_mtime))
     return out
 
 
@@ -298,6 +403,10 @@ def local_mkdir(path: str) -> None:
     os.makedirs(path, exist_ok=True)
 
 
+class TransferCancelled(Exception):
+    pass
+
+
 class TransferProgress:
     def __init__(self, total_bytes: int, total_files: int, draw):
         self.total_bytes = total_bytes or 1
@@ -309,6 +418,7 @@ class TransferProgress:
         self.cur_done = 0
         self._draw = draw
         self.cancel = False
+        self._last_draw = 0.0
 
     def start_file(self, name: str, size: int) -> None:
         self.cur_name = name
@@ -319,8 +429,12 @@ class TransferProgress:
 
     def chunk(self, transferred: int, total: int) -> None:
         self.cur_done = transferred
-        if self._draw:
+        now = time.monotonic()
+        if self._draw and (transferred >= total or now - self._last_draw >= 0.1):
+            self._last_draw = now
             self._draw()
+        if self.cancel:
+            raise TransferCancelled()
 
     def finish_file(self) -> None:
         self.done_bytes += self.cur_size
@@ -352,7 +466,16 @@ def plan_push(local_paths, remote_base: str, remote: "Remote"):
     return files, dirs
 
 
+@dataclass
+class TransferResult:
+    completed: int = 0
+    failed: int = 0
+    cancelled: bool = False
+    errors: List[str] = field(default_factory=list)
+
+
 def do_push(remote, files, dirs, progress):
+    result = TransferResult()
     for d in dirs:
         try:
             remote.sftp.mkdir(d)
@@ -360,10 +483,23 @@ def do_push(remote, files, dirs, progress):
             pass
     for lp, rp, size in files:
         if progress.cancel:
+            result.cancelled = True
             break
         progress.start_file(os.path.basename(lp), size)
-        remote.sftp.put(lp, rp, callback=progress.chunk)
-        progress.finish_file()
+        if progress.cancel:
+            result.cancelled = True
+            break
+        try:
+            remote.sftp.put(lp, rp, callback=progress.chunk)
+            progress.finish_file()
+            result.completed += 1
+        except TransferCancelled:
+            result.cancelled = True
+            break
+        except (OSError, paramiko.SSHException) as exc:
+            result.failed += 1
+            result.errors.append(f"{os.path.basename(lp)}: {exc}")
+    return result
 
 
 def plan_pull(remote_paths, local_base: str, remote: "Remote"):
@@ -390,15 +526,45 @@ def plan_pull(remote_paths, local_base: str, remote: "Remote"):
 
 
 def do_pull(remote, files, dirs, progress):
+    result = TransferResult()
     for d in dirs:
         os.makedirs(d, exist_ok=True)
     for rp, lp, size in files:
         if progress.cancel:
+            result.cancelled = True
             break
         os.makedirs(os.path.dirname(lp) or ".", exist_ok=True)
         progress.start_file(os.path.basename(rp), size)
-        remote.sftp.get(rp, lp, callback=progress.chunk)
-        progress.finish_file()
+        partial = lp + ".scp-select.part"
+        if progress.cancel:
+            result.cancelled = True
+            break
+        try:
+            remote.sftp.get(rp, partial, callback=progress.chunk)
+            os.replace(partial, lp)
+            progress.finish_file()
+            result.completed += 1
+        except TransferCancelled:
+            try:
+                os.remove(partial)
+            except OSError:
+                pass
+            result.cancelled = True
+            break
+        except (OSError, paramiko.SSHException) as exc:
+            try:
+                os.remove(partial)
+            except OSError:
+                pass
+            result.failed += 1
+            result.errors.append(f"{os.path.basename(rp)}: {exc}")
+    return result
+
+
+def transfer_conflicts(direction, remote, files) -> List[str]:
+    if direction == "push":
+        return [rp for _, rp, _ in files if remote.exists(rp)]
+    return [lp for _, lp, _ in files if os.path.exists(lp)]
 
 
 # ---------- curses helpers ----------
@@ -579,8 +745,9 @@ def help_overlay(stdscr):
         "Space           toggle selection",
         "a               select all in current pane",
         "c               clear selections in current pane",
-        "/               filter entries by name",
+        "/               fuzzy-find entries by name",
         "r               refresh current pane",
+        "s               cycle pane sorting",
         "d               delete current item (confirm)",
         "m               make a new directory",
         "p               PUSH  selected local  -> remote",
@@ -630,9 +797,10 @@ def run_transfer(stdscr, title, total_bytes, total_files, work_fn):
         stdscr.refresh()
 
     progress._draw = draw
+    progress.result = TransferResult()
     stdscr.nodelay(True)
     try:
-        work_fn(progress)
+        progress.result = work_fn(progress)
     finally:
         stdscr.nodelay(False)
         stdscr.erase()
@@ -716,6 +884,7 @@ def _apply_field(project, key, value):
 
 
 def edit_project_form(stdscr, project):
+    project = replace(project)
     fields = [
         ("Name", "name"),
         ("Host (user@ip)", "host"),
@@ -774,9 +943,12 @@ def edit_project_form(stdscr, project):
             if res is not None:
                 _apply_field(project, key, res)
         elif ch in (ord('s'), ord('S')):
-            if project.name.strip() and project.host.strip():
+            errors = validate_project(project)
+            if not errors:
+                project.local_dir = os.path.abspath(os.path.expanduser(project.local_dir))
+                project.identity_file = os.path.expanduser(project.identity_file)
                 return project
-            _message(stdscr, "Name and Host are required.")
+            _message(stdscr, errors[0])
 
 
 # ---------- browser ----------
@@ -791,6 +963,7 @@ class Pane:
         self.cursor = 0
         self.scroll = 0
         self.filter = ""
+        self.sort_mode = "name"
         self.load()
 
     def load(self):
@@ -804,12 +977,32 @@ class Pane:
         self.apply_filter()
 
     def apply_filter(self):
-        f = self.filter.lower()
-        dotdot = [e for e in self.entries if e.name == ".."]
-        rest = [e for e in self.entries if e.name != ".." and (not f or f in e.name.lower())]
-        self.view = dotdot + rest
+        dotdot = [] if self.filter else [e for e in self.entries if e.name == ".."]
+        ranked = []
+        for entry in self.entries:
+            if entry.name == "..":
+                continue
+            score = fuzzy_score(self.filter, entry.name)
+            if score is not None:
+                ranked.append((score, self._sort_key(entry), entry))
+        self.view = dotdot + [entry for _, _, entry in sorted(ranked)]
         if self.cursor >= len(self.view):
             self.cursor = max(0, len(self.view) - 1)
+
+    def _sort_key(self, entry):
+        if self.sort_mode == "type":
+            return (not entry.is_dir, Path(entry.name).suffix.casefold(), entry.name.casefold())
+        if self.sort_mode == "size":
+            return (not entry.is_dir, entry.size, entry.name.casefold())
+        if self.sort_mode == "modified":
+            return (not entry.is_dir, -entry.mtime, entry.name.casefold())
+        return (not entry.is_dir, entry.name.casefold())
+
+    def cycle_sort(self):
+        modes = ("name", "type", "size", "modified")
+        self.sort_mode = modes[(modes.index(self.sort_mode) + 1) % len(modes)]
+        self.apply_filter()
+        self.cursor = 0
 
     def current(self):
         if 0 <= self.cursor < len(self.view):
@@ -832,7 +1025,8 @@ def draw_pane(stdscr, pane, x, width, height, active, top_y=2):
     safe_addstr(stdscr, top_y, x, title.ljust(width)[:width], attr)
     plabel = pane.path
     if pane.filter:
-        plabel = f"{pane.path}  [filter: {pane.filter}]"
+        plabel = f"{pane.path}  [fuzzy: {pane.filter}]"
+    plabel += f"  [sort: {pane.sort_mode}]"
     safe_addstr(stdscr, top_y + 1, x, plabel[:width], cp(6))
     list_top = top_y + 2
     list_h = height - 2
@@ -890,14 +1084,55 @@ def _do_transfer(stdscr, project, remote, local_pane, remote_pane, direction):
 
         def work(p):
             do_pull(remote, files, dirs, p)
-    if not files:
-        src.selected.clear()
-        return "No files to transfer (empty selection?)."
+    if not files and not dirs:
+        return "No readable files or directories in the selection."
+    conflicts = transfer_conflicts(direction, remote, files)
+    verb = "Push" if direction == "push" else "Pull"
+    prompt = f"{verb} {len(files)} file(s), {human_size(total)}"
+    if conflicts:
+        prompt += f", overwrite {len(conflicts)}"
+    if not confirm_dialog(stdscr, prompt + "?"):
+        return "Transfer cancelled before starting."
     prog = run_transfer(stdscr, title, total, len(files), work)
-    src.selected.clear()
-    if prog.cancel:
-        return "Transfer cancelled."
-    return f"Done: {prog.done_files} file(s) transferred."
+    result = prog.result
+    if not result.cancelled and not result.failed:
+        src.selected.clear()
+    if result.cancelled:
+        return f"Cancelled: {result.completed} transferred, {result.failed} failed."
+    if result.failed:
+        detail = result.errors[0] if result.errors else "unknown error"
+        return f"Partial: {result.completed} transferred, {result.failed} failed ({detail})"
+    return f"Done: {result.completed} file(s) transferred."
+
+
+def live_fuzzy_filter(stdscr, pane, draw_browser):
+    original = pane.filter
+    buf = list(original)
+    while True:
+        pane.filter = "".join(buf)
+        pane.apply_filter()
+        pane.cursor = 0
+        pane.scroll = 0
+        query = pane.filter or "(type to search; Ctrl-U clears)"
+        draw_browser(f" Fuzzy: {query}   Enter:keep  Esc:cancel  Backspace:edit")
+        ch = stdscr.getch()
+        if ch in (10, curses.KEY_ENTER):
+            return True
+        if ch == 27:
+            pane.filter = original
+            pane.apply_filter()
+            pane.cursor = 0
+            pane.scroll = 0
+            return False
+        if ch in (curses.KEY_BACKSPACE, 127, 8):
+            if buf:
+                buf.pop()
+        elif ch == 21:  # Ctrl-U
+            buf.clear()
+        elif ch == curses.KEY_RESIZE:
+            continue
+        elif 32 <= ch <= 126:
+            buf.append(chr(ch))
 
 
 def browser_screen(stdscr, project, remote):
@@ -906,16 +1141,26 @@ def browser_screen(stdscr, project, remote):
     panes = {"local": local_pane, "remote": remote_pane}
     active = "local"
     status = "Connected.  Press ? for help."
-    while True:
+    default_help = " Tab:switch Space:sel p:push l:pull /:fuzzy s:sort r:refresh d:del m:mkdir ?:help b:back q:quit"
+
+    def draw_browser(help_text=None):
         stdscr.erase()
         h, w = stdscr.getmaxyx()
+        if h < 10 or w < 60:
+            safe_addstr(stdscr, 0, 0, "Terminal too small. Resize to at least 60x10.",
+                        cp(5) | curses.A_BOLD)
+            stdscr.refresh()
+            return
         draw_header(stdscr, project, status)
         half = max(20, w // 2)
         pane_h = h - 4
         draw_pane(stdscr, local_pane, 0, half, pane_h, active == "local")
         draw_pane(stdscr, remote_pane, half, w - half, pane_h, active == "remote")
-        draw_help_bar(stdscr, " Tab:switch  Space:sel  p:push  l:pull  /:filter  r:refresh  d:del  m:mkdir  ?:help  b:back  q:quit")
+        draw_help_bar(stdscr, help_text or default_help)
         stdscr.refresh()
+
+    while True:
+        draw_browser()
         pane = panes[active]
         ch = stdscr.getch()
         if ch in (ord('q'), 27):
@@ -972,6 +1217,9 @@ def browser_screen(stdscr, project, remote):
             pane.selected.clear()
         elif ch == ord('r'):
             pane.load()
+        elif ch == ord('s'):
+            pane.cycle_sort()
+            status = f"{pane.kind.upper()} sorted by {pane.sort_mode}."
         elif ch == ord('d'):
             e = pane.current()
             if e and e.name != "..":
@@ -1001,11 +1249,11 @@ def browser_screen(stdscr, project, remote):
                 except Exception as ex:
                     status = f"mkdir failed: {ex}"
         elif ch == ord('/'):
-            f = text_input(stdscr, f"Filter {pane.kind.upper()} (blank=clear):", pane.filter)
-            if f is not None:
-                pane.filter = f
-                pane.apply_filter()
-                pane.cursor = 0
+            accepted = live_fuzzy_filter(stdscr, pane, draw_browser)
+            status = (
+                f"{pane.kind.upper()} fuzzy filter: {pane.filter or 'cleared'}"
+                if accepted else "Fuzzy filter unchanged."
+            )
 
 
 def main(stdscr):
@@ -1013,6 +1261,8 @@ def main(stdscr):
     stdscr.keypad(True)
     init_colors()
     cfg = load_config()
+    if CONFIG_WARNING:
+        _message(stdscr, CONFIG_WARNING)
     while True:
         project = project_list_screen(stdscr, cfg)
         if project is None:
@@ -1025,6 +1275,9 @@ def main(stdscr):
             try:
                 remote.connect(password=pwd)
                 connected = True
+            except paramiko.BadHostKeyException as ex:
+                _message(stdscr, f"Host key changed for {ex.hostname}. Connection blocked.")
+                break
             except (paramiko.AuthenticationException, paramiko.SSHException):
                 attempts += 1
                 if attempts >= 3:
@@ -1039,10 +1292,10 @@ def main(stdscr):
         if not connected:
             continue
         try:
-            res = browser_screen(stdscr, project, remote)
+            result = browser_screen(stdscr, project, remote)
         finally:
             remote.close()
-        if res == "quit":
+        if result == "quit":
             break
 
 
@@ -1069,11 +1322,18 @@ def _write_wrapper(alias: str, script_path: str) -> Path:
     return wp
 
 
+def validate_alias(alias: str) -> str:
+    alias = (alias or "scp-select").strip() or "scp-select"
+    if alias in (".", "..") or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", alias):
+        raise ValueError("alias must contain only letters, numbers, '.', '_' or '-'")
+    return alias
+
+
 def install_command(alias: str = "scp-select"):
     """Install/refresh the global launcher wrapper for the given alias.
     Removes the previously-installed wrapper if the alias changed. Returns
     (wrapper_path, on_path_bool)."""
-    alias = (alias or "scp-select").strip() or "scp-select"
+    alias = validate_alias(alias)
     script_path = os.path.realpath(__file__)
     cfg = load_config()
     old_alias = cfg.get("command_alias")
@@ -1099,48 +1359,58 @@ def _print_path_hint():
     print(f'    export PATH="{WRAPPER_DIR}:$PATH"')
 
 
-def cli():
-    args = sys.argv[1:]
-    if "--list" in args:
+def build_parser():
+    parser = argparse.ArgumentParser(
+        prog="scp-select",
+        description="Browse and transfer files over SFTP in a two-pane terminal UI.",
+    )
+    actions = parser.add_mutually_exclusive_group()
+    actions.add_argument("--list", action="store_true", help="list saved projects and exit")
+    actions.add_argument("--install", nargs="?", const="scp-select", metavar="ALIAS",
+                         help="install a launcher, optionally using ALIAS")
+    actions.add_argument("--alias", nargs="?", const="scp-select", metavar="NAME",
+                         help="set or change the launcher alias")
+    actions.add_argument("--uninstall", action="store_true", help="remove the installed launcher")
+    parser.add_argument("--version", action="version", version=f"%(prog)s {VERSION}")
+    return parser
+
+
+def cli(argv=None):
+    args = build_parser().parse_args(argv)
+    if args.list:
         cfg = load_config()
+        if CONFIG_WARNING:
+            print(f"Warning: {CONFIG_WARNING}", file=sys.stderr)
         projects = cfg.get("projects", [])
         if not projects:
             print("No saved projects.")
-            return
+            return 0
         print(f"{len(projects)} project(s) in {CONFIG_FILE}:")
-        for p in projects:
-            pr = project_from_dict(p)
-            print(f"  {pr.name:<20} {pr.host}:{pr.port}  {pr.local_dir} -> {pr.remote_dir or '(none)'}")
-        cur = cfg.get("command_alias")
-        if cur:
-            print(f"  active command alias: {cur}  ->  {_wrapper_path(cur)}")
-        return
-    # --install [ALIAS]  (used by install.sh; also runnable directly)
-    if "--install" in args:
-        i = args.index("--install")
-        nxt = args[i + 1] if i + 1 < len(args) else ""
-        alias = nxt if nxt and not nxt.startswith("--") else "scp-select"
-        wp, on_path = install_command(alias)
-        print(f"Installed command '{alias}':")
+        for project_data in projects:
+            project = project_from_dict(project_data)
+            print(f"  {project.name:<20} {project.host}:{project.port}  "
+                  f"{project.local_dir} -> {project.remote_dir or '(none)'}")
+        current = cfg.get("command_alias")
+        if current:
+            print(f"  active command alias: {current}  ->  {_wrapper_path(current)}")
+        return 0
+
+    requested_alias = args.install or args.alias
+    if requested_alias:
+        try:
+            wp, on_path = install_command(requested_alias)
+        except (OSError, ValueError) as exc:
+            print(f"Could not install command: {exc}", file=sys.stderr)
+            return 2
+        action = "Installed command" if args.install else "Command alias is now"
+        print(f"{action} '{requested_alias}':")
         print(f"  wrapper: {wp}")
         if not on_path:
             _print_path_hint()
-        print(f"  Run '{alias}' to launch. Change it later with:  {alias} --alias newname")
-        return
-    # --alias [NAME]  (set/change the command alias at any time)
-    if "--alias" in args:
-        i = args.index("--alias")
-        nxt = args[i + 1] if i + 1 < len(args) else ""
-        alias = nxt if nxt and not nxt.startswith("--") else "scp-select"
-        wp, on_path = install_command(alias)
-        print(f"Command alias is now '{alias}':")
-        print(f"  wrapper: {wp}")
-        if not on_path:
-            _print_path_hint()
-        print(f"  Run '{alias}' to launch.")
-        return
-    # --uninstall  (remove the current wrapper)
-    if "--uninstall" in args:
+        print(f"  Run '{requested_alias}' to launch.")
+        return 0
+
+    if args.uninstall:
         cfg = load_config()
         alias = cfg.get("command_alias", "scp-select")
         wp = _wrapper_path(alias)
@@ -1148,16 +1418,19 @@ def cli():
             if wp.exists():
                 wp.unlink()
                 print(f"Removed '{wp}'.")
-        except OSError as ex:
-            print(f"Could not remove '{wp}': {ex}")
+        except OSError as exc:
+            print(f"Could not remove '{wp}': {exc}", file=sys.stderr)
+            return 1
         cfg.pop("command_alias", None)
         cfg.pop("script_path", None)
         save_config(cfg)
-        return
+        return 0
+
     try:
         curses.wrapper(main)
     except KeyboardInterrupt:
         pass
+    return 0
 
 
 if __name__ == "__main__":
