@@ -413,12 +413,13 @@ def init_colors():
         curses.use_default_colors()
     except Exception:
         bg = 0
-    curses.init_pair(1, curses.COLOR_WHITE, curses.COLOR_BLUE)
+    curses.init_pair(1, curses.COLOR_BLACK, curses.COLOR_CYAN)
     curses.init_pair(2, curses.COLOR_BLACK, curses.COLOR_WHITE)
     curses.init_pair(3, curses.COLOR_GREEN, bg)
     curses.init_pair(4, curses.COLOR_YELLOW, bg)
     curses.init_pair(5, curses.COLOR_RED, bg)
     curses.init_pair(6, curses.COLOR_CYAN, bg)
+    curses.init_pair(7, curses.COLOR_BLACK, curses.COLOR_YELLOW)
 
 
 def safe_addstr(win, y, x, s, attr=0):
@@ -467,7 +468,7 @@ def text_input(stdscr, prompt, initial="", hidden=False, suggest_fn=None):
                     hint = "(no matches)  Enter=OK  Esc=cancel"
         else:
             hint = "Enter=OK   Esc=Cancel"
-        safe_addstr(stdscr, h - 1, 0, hint[: w - 1], cp(4) | curses.A_BOLD)
+        safe_addstr(stdscr, h - 1, 0, hint[: w - 1], cp(7) | curses.A_BOLD)
         try:
             stdscr.move(1, min(cur, w - 2))
         except curses.error:
@@ -641,7 +642,7 @@ def project_list_screen(stdscr, cfg):
         stdscr.erase()
         h, w = stdscr.getmaxyx()
         safe_addstr(stdscr, 0, 0, " scp-select  -  choose a project", cp(1) | curses.A_BOLD)
-        safe_addstr(stdscr, 1, 0, " n:new  e:edit  d:delete  Enter:open  q:quit", cp(4) | curses.A_BOLD)
+        safe_addstr(stdscr, 1, 0, " n:new  e:edit  d:delete  Enter:open  q:quit", cp(7) | curses.A_BOLD)
         n = len(projects)
         if cursor >= n:
             cursor = max(0, n - 1)
@@ -722,7 +723,7 @@ def edit_project_form(stdscr, project):
         stdscr.erase()
         h, w = stdscr.getmaxyx()
         safe_addstr(stdscr, 0, 0, " Edit project", cp(1) | curses.A_BOLD)
-        safe_addstr(stdscr, 1, 0, " Up/Down:move  Enter:edit field  S:save  Esc:cancel", cp(4) | curses.A_BOLD)
+        safe_addstr(stdscr, 1, 0, " Up/Down:move  Enter:edit field  S:save  Esc:cancel", cp(7) | curses.A_BOLD)
         for i, (label, key) in enumerate(fields):
             val = getattr(project, key)
             if isinstance(val, bool):
