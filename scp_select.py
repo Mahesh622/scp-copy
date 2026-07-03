@@ -420,6 +420,13 @@ def init_colors():
     curses.init_pair(5, curses.COLOR_RED, bg)
     curses.init_pair(6, curses.COLOR_CYAN, bg)
     curses.init_pair(7, curses.COLOR_BLACK, curses.COLOR_YELLOW)
+    # Selection / cursor-row highlight: medium grey background with bold white
+    # text. Uses a 256-colour extended grey (238) when the terminal supports it;
+    # falls back to the basic white bar on 16-colour terminals.
+    if curses.COLORS >= 256:
+        curses.init_pair(8, curses.COLOR_WHITE, 238)
+    else:
+        curses.init_pair(8, curses.COLOR_BLACK, curses.COLOR_WHITE)
 
 
 def safe_addstr(win, y, x, s, attr=0):
@@ -661,7 +668,7 @@ def project_list_screen(stdscr, cfg):
             sel = (idx == cursor)
             tag = ">" if sel else " "
             line = f" {tag} {p.name:<18} {(p.host or '(no host)'):<26} {p.local_dir} -> {p.remote_dir or '(none)'}"
-            attr = cp(2) if sel else 0
+            attr = (cp(8) | curses.A_BOLD) if sel else 0
             safe_addstr(stdscr, 3 + i, 0, line[: w - 1], attr)
         safe_addstr(stdscr, h - 1, 0, f" {n} project(s)   |   config: {CONFIG_FILE}", cp(1) | curses.A_BOLD)
         stdscr.refresh()
@@ -729,7 +736,7 @@ def edit_project_form(stdscr, project):
             if isinstance(val, bool):
                 val = "yes" if val else "no"
             line = f"  {label:<28}: {val}"
-            attr = cp(2) if i == cur else 0
+            attr = (cp(8) | curses.A_BOLD) if i == cur else 0
             safe_addstr(stdscr, 3 + i, 0, line[: w - 1], attr)
         stdscr.refresh()
         ch = stdscr.getch()
@@ -855,7 +862,7 @@ def draw_pane(stdscr, pane, x, width, height, active, top_y=2):
         if sel:
             a |= cp(3)
         if cur:
-            a = cp(2)
+            a = cp(8) | curses.A_BOLD
         safe_addstr(stdscr, list_top + i, x, text[:width], a)
     cnt = len(pane.selected)
     if cnt:
