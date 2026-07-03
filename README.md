@@ -21,23 +21,46 @@ you browse both sides, press `Space` to tick the files you want, and hit `p` (pu
 
 ## Install
 
-Option A — run from source:
+**Option 1 — from the release tarball (recommended for sharing):**
+
+```bash
+tar xzf scp-select-1.0.0.tar.gz
+cd scp-select-1.0.0
+pip install -r requirements.txt   # installs paramiko
+./install.sh
+```
+
+`install.sh` is interactive: it asks for the **command name** (default `scp-select`),
+creates a launcher in `~/.local/bin/`, and offers to add that dir to your `PATH` if it
+isn't already. After that you can run `scp-select` from any directory.
+
+**Option 2 — from the git repo, run from source:**
 
 ```bash
 cd scp-copy
 pip install -r requirements.txt
-chmod +x scp_select.py
-# optional: put it on your PATH
-ln -s "$PWD/scp_select.py" ~/.local/bin/scp-select
+python3 scp_select.py --install        # auto-configure the global command
 ```
 
-Option B — install as a package (provides the `scp-select` command):
+**Option 3 — install as a Python package:**
 
 ```bash
 cd scp-copy
-pip install .
-scp-select            # launch the TUI
+pip install .                          # provides the `scp-select` command
 ```
+
+### Changing the command alias
+
+You can pick any name for the command (or change it later) without reinstalling:
+
+```bash
+scp-select --alias scpp          # the command is now 'scpp'
+scpp                             # launch the TUI
+scp-select --uninstall           # remove the launcher wrapper
+```
+
+The chosen alias is remembered in `~/.config/scp-select/projects.json`, and switching
+aliases automatically removes the old wrapper.
 
 ## Run
 
