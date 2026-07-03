@@ -467,7 +467,7 @@ def text_input(stdscr, prompt, initial="", hidden=False, suggest_fn=None):
                     hint = "(no matches)  Enter=OK  Esc=cancel"
         else:
             hint = "Enter=OK   Esc=Cancel"
-        safe_addstr(stdscr, h - 1, 0, hint[: w - 1], cp(4))
+        safe_addstr(stdscr, h - 1, 0, hint[: w - 1], cp(4) | curses.A_BOLD)
         try:
             stdscr.move(1, min(cur, w - 2))
         except curses.error:
@@ -556,7 +556,7 @@ def draw_header(stdscr, project, status=""):
 
 def draw_help_bar(stdscr, hints):
     h, w = stdscr.getmaxyx()
-    safe_addstr(stdscr, h - 1, 0, hints[: w - 1], cp(1))
+    safe_addstr(stdscr, h - 1, 0, hints[: w - 1], cp(1) | curses.A_BOLD)
 
 
 def help_overlay(stdscr):
@@ -614,11 +614,11 @@ def run_transfer(stdscr, title, total_bytes, total_files, work_fn):
         bar = "#" * filled + "-" * (bar_w - filled)
         y = h // 2 - 2
         safe_addstr(stdscr, 0, 0, f" {title}", cp(1) | curses.A_BOLD)
-        safe_addstr(stdscr, y, 2, f"file {progress.done_files}/{progress.total_files}", cp(4))
-        safe_addstr(stdscr, y + 1, 2, f"{human_size(done)} / {human_size(progress.total_bytes)}   {pct:5.1f}%", cp(3))
-        safe_addstr(stdscr, y + 2, 2, "[" + bar + "]", cp(6))
+        safe_addstr(stdscr, y, 2, f"file {progress.done_files}/{progress.total_files}", cp(4) | curses.A_BOLD)
+        safe_addstr(stdscr, y + 1, 2, f"{human_size(done)} / {human_size(progress.total_bytes)}   {pct:5.1f}%", cp(3) | curses.A_BOLD)
+        safe_addstr(stdscr, y + 2, 2, "[" + bar + "]", cp(6) | curses.A_BOLD)
         safe_addstr(stdscr, y + 3, 2, progress.cur_name[: w - 4], 0)
-        safe_addstr(stdscr, h - 1, 0, "Transferring...  Esc = cancel", cp(5))
+        safe_addstr(stdscr, h - 1, 0, "Transferring...  Esc = cancel", cp(5) | curses.A_BOLD)
         stdscr.refresh()
 
     progress._draw = draw
@@ -641,7 +641,7 @@ def project_list_screen(stdscr, cfg):
         stdscr.erase()
         h, w = stdscr.getmaxyx()
         safe_addstr(stdscr, 0, 0, " scp-select  -  choose a project", cp(1) | curses.A_BOLD)
-        safe_addstr(stdscr, 1, 0, " n:new  e:edit  d:delete  Enter:open  q:quit", cp(4))
+        safe_addstr(stdscr, 1, 0, " n:new  e:edit  d:delete  Enter:open  q:quit", cp(4) | curses.A_BOLD)
         n = len(projects)
         if cursor >= n:
             cursor = max(0, n - 1)
@@ -662,7 +662,7 @@ def project_list_screen(stdscr, cfg):
             line = f" {tag} {p.name:<18} {(p.host or '(no host)'):<26} {p.local_dir} -> {p.remote_dir or '(none)'}"
             attr = cp(2) if sel else 0
             safe_addstr(stdscr, 3 + i, 0, line[: w - 1], attr)
-        safe_addstr(stdscr, h - 1, 0, f" {n} project(s)   |   config: {CONFIG_FILE}", cp(1))
+        safe_addstr(stdscr, h - 1, 0, f" {n} project(s)   |   config: {CONFIG_FILE}", cp(1) | curses.A_BOLD)
         stdscr.refresh()
         ch = stdscr.getch()
         if ch in (ord('q'), 27):
@@ -722,7 +722,7 @@ def edit_project_form(stdscr, project):
         stdscr.erase()
         h, w = stdscr.getmaxyx()
         safe_addstr(stdscr, 0, 0, " Edit project", cp(1) | curses.A_BOLD)
-        safe_addstr(stdscr, 1, 0, " Up/Down:move  Enter:edit field  S:save  Esc:cancel", cp(4))
+        safe_addstr(stdscr, 1, 0, " Up/Down:move  Enter:edit field  S:save  Esc:cancel", cp(4) | curses.A_BOLD)
         for i, (label, key) in enumerate(fields):
             val = getattr(project, key)
             if isinstance(val, bool):
