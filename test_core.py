@@ -413,6 +413,44 @@ def test_transfer_results_conflicts_and_cleanup(tmp_path):
     print("ok  transfer results, conflicts + partial cleanup")
 
 
+
+def test_do_transfer_propagates_result():
+    original_plan_push = S.plan_push
+    original_plan_pull = S.plan_pull
+    original_conflicts = S.transfer_conflicts
+    original_confirm = S.confirm_dialog
+    original_run_transfer = S.run_transfer
+    original_do_push = S.do_push
+    original_do_pull = S.do_pull
+    try:
+        S.plan_push = lambda paths, base, remote: ([("local", "/remote/file", 1)], [])
+        S.plan_pull = lambda paths, base, remote: ([("/remote/file", "local", 1)], [])
+        S.transfer_conflicts = lambda direction, remote, files: []
+        S.confirm_dialog = lambda stdscr, prompt: True
+        S.run_transfer = lambda stdscr, title, total, count, work: type(
+            "CompletedTransfer", (), {"result": work(object())}
+        )()
+        S.do_push = lambda remote, files, dirs, progress: S.TransferResult(completed=1)
+        S.do_pull = lambda remote, files, dirs, progress: S.TransferResult(completed=1)
+
+        for direction in ("push", "pull"):
+            local = type("Pane", (), {"selected": {"local"}, "path": "/local"})()
+            remote_pane = type("Pane", (), {"selected": {"/remote/file"}, "path": "/remote"})()
+            project = type("Project", (), {"host": "example.com"})()
+            status = S._do_transfer(None, project, object(), local, remote_pane, direction)
+            source = local if direction == "push" else remote_pane
+            assert status == "Done: 1 file(s) transferred."
+            assert source.selected == set()
+    finally:
+        S.plan_push = original_plan_push
+        S.plan_pull = original_plan_pull
+        S.transfer_conflicts = original_conflicts
+        S.confirm_dialog = original_confirm
+        S.run_transfer = original_run_transfer
+        S.do_push = original_do_push
+        S.do_pull = original_do_pull
+    print("ok  transfer callback propagates result")
+
 def test_cli_and_alias_validation():
     args = S.build_parser().parse_args(["--install", "scp-fast"])
     assert args.install == "scp-fast"
@@ -451,6 +489,7 @@ def main():
         test_remote_rename_and_selected_path_update()
         test_config_recovery_and_validation(tmp)
         test_transfer_results_conflicts_and_cleanup(tmp)
+        test_do_transfer_propagates_result()
         test_cli_and_alias_validation()
     print("\nALL TESTS PASSED")
 

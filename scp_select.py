@@ -1117,7 +1117,7 @@ def _do_transfer(stdscr, project, remote, local_pane, remote_pane, direction):
         title = f"PUSH  ->  {project.host}:{remote_pane.path}"
 
         def work(p):
-            do_push(remote, files, dirs, p)
+            return do_push(remote, files, dirs, p)
     else:
         src = remote_pane
         if not src.selected:
@@ -1127,7 +1127,7 @@ def _do_transfer(stdscr, project, remote, local_pane, remote_pane, direction):
         title = f"PULL  ->  {local_pane.path}"
 
         def work(p):
-            do_pull(remote, files, dirs, p)
+            return do_pull(remote, files, dirs, p)
     if not files and not dirs:
         return "No readable files or directories in the selection."
     conflicts = transfer_conflicts(direction, remote, files)
