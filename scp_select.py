@@ -639,78 +639,88 @@ def text_input(stdscr, prompt, initial="", hidden=False, suggest_fn=None):
     cur = len(buf)
     matches: List[str] = []
     match_idx = 0
-    while True:
-        stdscr.erase()
-        h, w = stdscr.getmaxyx()
-        safe_addstr(stdscr, 0, 0, prompt[: w - 1], cp(4) | curses.A_BOLD)
-        disp = ("*" * len(buf)) if hidden else "".join(buf)
-        line = disp + " " * max(1, w - 1 - len(disp))
-        safe_addstr(stdscr, 1, 0, line[: w - 1], cp(2))
-        if suggest_fn and not hidden:
-            try:
-                matches = suggest_fn(disp)
-            except Exception as e:
-                matches = []
-                safe_addstr(stdscr, 3, 0, f"(suggestions unavailable: {str(e)[: w - 40]})", cp(5))
-            else:
-                if match_idx >= len(matches):
-                    match_idx = 0
-                if matches:
-                    max_show = max(1, h - 5)
-                    for i, m in enumerate(matches[:max_show]):
-                        attr = (cp(3) | curses.A_BOLD) if i == match_idx else 0
-                        marker = ">" if i == match_idx else " "
-                        safe_addstr(stdscr, 3 + i, 0, (marker + " " + m)[: w - 1], attr)
-                    more = len(matches) - max_show
-                    if more > 0:
-                        safe_addstr(stdscr, 3 + max_show, 0, f"  ...+{more} more", cp(4))
-                    hint = "Tab=complete  Up/Dn=pick  Enter=OK  Esc=cancel"
+    try:
+        curses.curs_set(1)
+    except curses.error:
+        pass
+    try:
+        while True:
+            stdscr.erase()
+            h, w = stdscr.getmaxyx()
+            safe_addstr(stdscr, 0, 0, prompt[: w - 1], cp(4) | curses.A_BOLD)
+            disp = ("*" * len(buf)) if hidden else "".join(buf)
+            line = disp + " " * max(1, w - 1 - len(disp))
+            safe_addstr(stdscr, 1, 0, line[: w - 1], cp(2))
+            if suggest_fn and not hidden:
+                try:
+                    matches = suggest_fn(disp)
+                except Exception as e:
+                    matches = []
+                    safe_addstr(stdscr, 3, 0, f"(suggestions unavailable: {str(e)[: w - 40]})", cp(5))
                 else:
-                    hint = "(no matches)  Enter=OK  Esc=cancel"
-        else:
-            hint = "Enter=OK   Esc=Cancel"
-        safe_addstr(stdscr, h - 1, 0, hint[: w - 1], cp(7) | curses.A_BOLD)
+                    if match_idx >= len(matches):
+                        match_idx = 0
+                    if matches:
+                        max_show = max(1, h - 5)
+                        for i, m in enumerate(matches[:max_show]):
+                            attr = (cp(3) | curses.A_BOLD) if i == match_idx else 0
+                            marker = ">" if i == match_idx else " "
+                            safe_addstr(stdscr, 3 + i, 0, (marker + " " + m)[: w - 1], attr)
+                        more = len(matches) - max_show
+                        if more > 0:
+                            safe_addstr(stdscr, 3 + max_show, 0, f"  ...+{more} more", cp(4))
+                        hint = "Tab=complete  Up/Dn=pick  Enter=OK  Esc=cancel"
+                    else:
+                        hint = "(no matches)  Enter=OK  Esc=cancel"
+            else:
+                hint = "Enter=OK   Esc=Cancel"
+            safe_addstr(stdscr, h - 1, 0, hint[: w - 1], cp(7) | curses.A_BOLD)
+            try:
+                stdscr.move(1, min(cur, w - 2))
+            except curses.error:
+                pass
+            stdscr.refresh()
+            ch = stdscr.getch()
+            if ch in (10, curses.KEY_ENTER):
+                return "".join(buf)
+            if ch == 27:
+                return None
+            if ch in (curses.KEY_BACKSPACE, 127, 8):
+                if cur > 0:
+                    cur -= 1
+                    buf.pop(cur)
+                match_idx = 0
+            elif ch == 9:  # Tab - accept highlighted suggestion
+                if matches:
+                    buf = list(matches[match_idx])
+                    cur = len(buf)
+                match_idx = 0
+                continue
+            elif ch == curses.KEY_UP:
+                if matches:
+                    match_idx = (match_idx - 1) % len(matches)
+                continue
+            elif ch == curses.KEY_DOWN:
+                if matches:
+                    match_idx = (match_idx + 1) % len(matches)
+                continue
+            elif ch == curses.KEY_LEFT:
+                cur = max(0, cur - 1)
+            elif ch == curses.KEY_RIGHT:
+                cur = min(len(buf), cur + 1)
+            elif ch == curses.KEY_HOME:
+                cur = 0
+            elif ch == curses.KEY_END:
+                cur = len(buf)
+            elif 32 <= ch <= 126:
+                buf.insert(cur, chr(ch))
+                cur += 1
+                match_idx = 0
+    finally:
         try:
-            stdscr.move(1, min(cur, w - 2))
+            curses.curs_set(0)
         except curses.error:
             pass
-        stdscr.refresh()
-        ch = stdscr.getch()
-        if ch in (10, curses.KEY_ENTER):
-            return "".join(buf)
-        if ch == 27:
-            return None
-        if ch in (curses.KEY_BACKSPACE, 127, 8):
-            if cur > 0:
-                cur -= 1
-                buf.pop(cur)
-            match_idx = 0
-        elif ch == 9:  # Tab - accept highlighted suggestion
-            if matches:
-                buf = list(matches[match_idx])
-                cur = len(buf)
-            match_idx = 0
-            continue
-        elif ch == curses.KEY_UP:
-            if matches:
-                match_idx = (match_idx - 1) % len(matches)
-            continue
-        elif ch == curses.KEY_DOWN:
-            if matches:
-                match_idx = (match_idx + 1) % len(matches)
-            continue
-        elif ch == curses.KEY_LEFT:
-            cur = max(0, cur - 1)
-        elif ch == curses.KEY_RIGHT:
-            cur = min(len(buf), cur + 1)
-        elif ch == curses.KEY_HOME:
-            cur = 0
-        elif ch == curses.KEY_END:
-            cur = len(buf)
-        elif 32 <= ch <= 126:
-            buf.insert(cur, chr(ch))
-            cur += 1
-            match_idx = 0
 
 
 
