@@ -349,6 +349,13 @@ class Remote:
         except IOError:
             pass
 
+    def rename(self, path: str, new_name: str) -> str:
+        target = posix_join(posix_dirname(path), new_name)
+        if self.exists(target):
+            raise FileExistsError(f"target already exists: {target}")
+        self.sftp.rename(path, target)
+        return target
+
     def rmtree(self, path: str) -> None:
         for e in self.listdir(path):
             if e.name in (".", ".."):
@@ -401,6 +408,27 @@ def local_rmtree(path: str) -> None:
 
 def local_mkdir(path: str) -> None:
     os.makedirs(path, exist_ok=True)
+
+
+def validate_rename_name(name: str) -> str:
+    name = (name or "").strip()
+    if not name:
+        raise ValueError("Name cannot be empty.")
+    if name in (".", ".."):
+        raise ValueError("Name cannot be '.' or '..'.")
+    if "/" in name or "\0" in name or (os.sep != "/" and os.sep in name):
+        raise ValueError("Name cannot contain path separators.")
+    if os.altsep and os.altsep in name:
+        raise ValueError("Name cannot contain path separators.")
+    return name
+
+
+def local_rename(path: str, new_name: str) -> str:
+    target = os.path.join(os.path.dirname(path), new_name)
+    if os.path.exists(target):
+        raise FileExistsError(f"target already exists: {target}")
+    os.rename(path, target)
+    return target
 
 
 class TransferCancelled(Exception):
@@ -750,6 +778,7 @@ def help_overlay(stdscr):
         "s               cycle pane sorting",
         "d               delete current item (confirm)",
         "m               make a new directory",
+        "R               rename current item",
         "p               PUSH  selected local  -> remote",
         "l               PULL  selected remote -> local",
         "b               back to project list",
@@ -1018,6 +1047,11 @@ class Pane:
         else:
             self.selected.add(e.path)
 
+    def replace_selected(self, old_path, new_path):
+        if old_path in self.selected:
+            self.selected.discard(old_path)
+            self.selected.add(new_path)
+
 
 def draw_pane(stdscr, pane, x, width, height, active, top_y=2):
     title = " LOCAL " if pane.kind == "local" else " REMOTE "
@@ -1135,13 +1169,44 @@ def live_fuzzy_filter(stdscr, pane, draw_browser):
             buf.append(chr(ch))
 
 
+def _focus_path(pane, path):
+    for index, entry in enumerate(pane.view):
+        if entry.path == path:
+            pane.cursor = index
+            pane.scroll = 0
+            return
+
+
+def _rename_current_item(stdscr, pane, remote):
+    e = pane.current()
+    if not e or e.name == "..":
+        return "No item to rename."
+    new_name = text_input(stdscr, f"Rename {pane.kind.upper()} '{e.name}' to:", e.name)
+    if new_name is None:
+        return "Rename cancelled."
+    try:
+        new_name = validate_rename_name(new_name)
+        if new_name == e.name:
+            return "Rename unchanged."
+        if pane.kind == "local":
+            new_path = local_rename(e.path, new_name)
+        else:
+            new_path = remote.rename(e.path, new_name)
+        pane.replace_selected(e.path, new_path)
+        pane.load()
+        _focus_path(pane, new_path)
+        return f"Renamed {e.name} to {new_name}"
+    except Exception as ex:
+        return f"Rename failed: {ex}"
+
+
 def browser_screen(stdscr, project, remote):
     local_pane = Pane("local", project.local_dir)
     remote_pane = Pane("remote", project.remote_dir or "/", remote=remote)
     panes = {"local": local_pane, "remote": remote_pane}
     active = "local"
     status = "Connected.  Press ? for help."
-    default_help = " Tab:switch Space:sel p:push l:pull /:fuzzy s:sort r:refresh d:del m:mkdir ?:help b:back q:quit"
+    default_help = " Tab:switch Space:sel p:push l:pull /:fuzzy s:sort r:refresh d:del m:mkdir R:rename ?:help b:back q:quit"
 
     def draw_browser(help_text=None):
         stdscr.erase()
@@ -1248,6 +1313,8 @@ def browser_screen(stdscr, project, remote):
                     status = f"Created {name}"
                 except Exception as ex:
                     status = f"mkdir failed: {ex}"
+        elif ch == ord('R'):
+            status = _rename_current_item(stdscr, pane, remote)
         elif ch == ord('/'):
             accepted = live_fuzzy_filter(stdscr, pane, draw_browser)
             status = (

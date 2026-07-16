@@ -11,7 +11,7 @@ scp -P 2222 ./src/main.py ./src/util.py user@myserver:/var/www/app/src/
 ```
 
 you browse both sides, press `Space` to tick the files you want, and hit `p` (push) or
-`l` (pull). Directories transfer recursively, with a live progress bar.
+`l` (pull). Directories transfer recursively, with a live progress bar. You can also rename items directly in either pane.
 
 ## Requirements
 
@@ -123,6 +123,7 @@ Projects are stored in `~/.config/scp-select/projects.json`.
 | `r`                 | Refresh current pane |
 | `d`                 | Delete current item (with confirm) |
 | `m`                 | Make a new directory in current pane |
+| `R`                 | Rename current item in current pane |
 | `p`                 | **Push** selected LOCAL items -> REMOTE |
 | `l`                 | **Pull** selected REMOTE items -> LOCAL |
 | `b`                 | Back to project list |

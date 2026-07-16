@@ -285,6 +285,70 @@ def test_fuzzy_score_and_pane_sorting(tmp_path):
     print("ok  fuzzy ranking, live filtering + independent pane sorting")
 
 
+
+def test_rename_helpers(tmp_path):
+    src = tmp_path / "old.txt"
+    src.write_text("payload")
+    renamed = S.local_rename(str(src), "new.txt")
+    assert renamed == str(tmp_path / "new.txt")
+    assert not src.exists()
+    assert (tmp_path / "new.txt").read_text() == "payload"
+
+    conflict = tmp_path / "conflict.txt"
+    conflict.write_text("x")
+    try:
+        S.local_rename(str(tmp_path / "new.txt"), "conflict.txt")
+    except FileExistsError:
+        pass
+    else:
+        raise AssertionError("rename overwrite was allowed")
+
+    assert S.validate_rename_name("  final.txt  ") == "final.txt"
+    for invalid in ("", ".", "..", "sub/name", "bad\0name"):
+        try:
+            S.validate_rename_name(invalid)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"invalid rename accepted: {invalid!r}")
+    print("ok  local rename helpers + validation")
+
+
+def test_remote_rename_and_selected_path_update():
+    class RenameSFTP:
+        def __init__(self):
+            self.paths = {"/srv/old.txt"}
+            self.renames = []
+
+        def stat(self, path):
+            if path in self.paths:
+                return object()
+            raise IOError("missing")
+
+        def rename(self, old, new):
+            self.renames.append((old, new))
+            self.paths.remove(old)
+            self.paths.add(new)
+
+    remote = S.Remote.__new__(S.Remote)
+    remote.sftp = RenameSFTP()
+    new_path = remote.rename("/srv/old.txt", "new.txt")
+    assert new_path == "/srv/new.txt"
+    assert remote.sftp.renames == [("/srv/old.txt", "/srv/new.txt")]
+
+    try:
+        remote.rename("/srv/new.txt", "new.txt")
+    except FileExistsError:
+        pass
+    else:
+        raise AssertionError("remote rename overwrite was allowed")
+
+    pane = S.Pane.__new__(S.Pane)
+    pane.selected = {"/srv/new.txt", "/srv/keep.txt"}
+    pane.replace_selected("/srv/new.txt", "/srv/final.txt")
+    assert pane.selected == {"/srv/final.txt", "/srv/keep.txt"}
+    print("ok  remote rename + selected path update")
+
 def test_config_recovery_and_validation(tmp_path):
     cfg_dir = tmp_path / "secure-config"
     S.CONFIG_DIR = cfg_dir
@@ -383,6 +447,8 @@ def main():
         test_plan_push(tmp)
         test_plan_pull(tmp)
         test_do_pull_writes_files(tmp)
+        test_rename_helpers(tmp)
+        test_remote_rename_and_selected_path_update()
         test_config_recovery_and_validation(tmp)
         test_transfer_results_conflicts_and_cleanup(tmp)
         test_cli_and_alias_validation()
