@@ -426,7 +426,11 @@ def test_do_transfer_propagates_result():
         S.plan_push = lambda paths, base, remote: ([("local", "/remote/file", 1)], [])
         S.plan_pull = lambda paths, base, remote: ([("/remote/file", "local", 1)], [])
         S.transfer_conflicts = lambda direction, remote, files: []
-        S.confirm_dialog = lambda stdscr, prompt: True
+
+        def fail_confirm(stdscr, prompt):
+            raise AssertionError("transfer confirmation should not be shown")
+
+        S.confirm_dialog = fail_confirm
         S.run_transfer = lambda stdscr, title, total, count, work: type(
             "CompletedTransfer", (), {"result": work(object())}
         )()

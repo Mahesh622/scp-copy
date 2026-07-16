@@ -1130,13 +1130,6 @@ def _do_transfer(stdscr, project, remote, local_pane, remote_pane, direction):
             return do_pull(remote, files, dirs, p)
     if not files and not dirs:
         return "No readable files or directories in the selection."
-    conflicts = transfer_conflicts(direction, remote, files)
-    verb = "Push" if direction == "push" else "Pull"
-    prompt = f"{verb} {len(files)} file(s), {human_size(total)}"
-    if conflicts:
-        prompt += f", overwrite {len(conflicts)}"
-    if not confirm_dialog(stdscr, prompt + "?"):
-        return "Transfer cancelled before starting."
     prog = run_transfer(stdscr, title, total, len(files), work)
     result = prog.result
     if not result.cancelled and not result.failed:
